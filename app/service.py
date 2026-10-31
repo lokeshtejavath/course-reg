@@ -11,8 +11,12 @@ Policies (see docs/DESIGN.md for the reasoning):
 * Ineligible at promotion time: skipped but retained. They keep their queue
   position and are reconsidered, in place, the next time seats open.
 
-Every public method runs in one transaction and starts by locking the offering
-(see app/db.py), so capacity checks and the writes that depend on them are atomic.
+* Learners: created at any time (directly, or inline on enroll) with a
+  server-generated UUID and a unique, user-chosen username for reference.
+
+Every public method runs in one transaction. Registration operations start by
+locking the offering (see app/db.py), so capacity checks and the writes that
+depend on them are atomic.
 """
 
 from dataclasses import dataclass
@@ -22,7 +26,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import errors
-from app.models import Learner, Offering, OfferingPrerequisite, Registration, RegistrationStatus
+from app.models import (
+    Learner,
+    LearnerCompletedCourse,
+    Offering,
+    OfferingPrerequisite,
+    Registration,
+    RegistrationStatus,
+)
 
 
 def normalize_course_code(code: str) -> str:
@@ -30,11 +41,30 @@ def normalize_course_code(code: str) -> str:
 
 
 @dataclass(frozen=True)
+class LearnerProfile:
+    """Details for creating a learner; the server assigns the UUID."""
+
+    username: str
+    name: str
+    completed_courses: list[str]
+
+
+@dataclass(frozen=True)
+class LearnerView:
+    id: str
+    username: str
+    name: str
+    completed_courses: list[str]
+
+
+@dataclass(frozen=True)
 class EnrollResult:
     offering_id: int
     learner_id: str
+    username: str
     status: RegistrationStatus
     waitlist_position: int | None  # 1-based; None when enrolled
+    learner_created: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +85,7 @@ class LeaveWaitlistResult:
 @dataclass(frozen=True)
 class WaitlistEntryView:
     learner_id: str
+    username: str
     position: int
     eligible: bool
     missing_prerequisites: list[str]
@@ -107,13 +138,72 @@ class RegistrationService:
                 raise errors.OfferingNotFound(f"Offering {offering_id} not found.", offering_id=offering_id)
             return self._build_state(session, offering)
 
+    # ------------------------------------------------------------------- learners
+
+    def create_learner(self, profile: LearnerProfile) -> LearnerView:
+        try:
+            with self._session_factory.begin() as session:
+                learner = self._insert_learner(session, profile)
+                return self._learner_view(learner)
+        except IntegrityError as exc:
+            raise self._username_taken(profile.username) from exc
+
+    def get_learner(self, learner_id: str) -> LearnerView:
+        with self._session_factory.begin() as session:
+            return self._learner_view(self._get_learner(session, learner_id))
+
+    def get_learner_by_username(self, username: str) -> LearnerView:
+        with self._session_factory.begin() as session:
+            learner = self._find_by_username(session, username)
+            if learner is None:
+                raise errors.LearnerNotFound(f"No learner with username {username!r}.", username=username)
+            return self._learner_view(learner)
+
+    def set_completed_courses(self, learner_id: str, completed_courses: list[str]) -> LearnerView:
+        """Replace a learner's completed courses.
+
+        Waitlist positions are untouched. A waiting learner who becomes eligible
+        is considered at the next seat opening; one who becomes ineligible is
+        skipped (but retained) from then on.
+        """
+        with self._session_factory.begin() as session:
+            learner = self._get_learner(session, learner_id)
+            codes = sorted({normalize_course_code(c) for c in completed_courses})
+            learner.completed_courses = [LearnerCompletedCourse(course_code=c) for c in codes]
+            session.flush()
+            return self._learner_view(learner)
+
     # ---------------------------------------------------------------- operations
 
     def enroll(self, offering_id: int, learner_id: str) -> EnrollResult:
+        def resolve(session: Session) -> tuple[Learner, bool]:
+            return self._get_learner(session, learner_id), False
+
+        return self._enroll(offering_id, resolve)
+
+    def enroll_with_profile(self, offering_id: int, profile: LearnerProfile) -> EnrollResult:
+        """Enroll by username, creating the learner first if the username is new.
+
+        If the username already exists, that learner is used as-is: the supplied
+        name and completed courses are NOT applied (use set_completed_courses).
+        Creation and enrollment share one transaction, so a rejected enrollment
+        (e.g. prerequisites not met) also discards the newly created learner.
+        """
+
+        def resolve(session: Session) -> tuple[Learner, bool]:
+            existing = self._find_by_username(session, profile.username)
+            if existing is not None:
+                return existing, False
+            return self._insert_learner(session, profile), True
+
+        return self._enroll(offering_id, resolve)
+
+    def _enroll(self, offering_id: int, resolve_learner) -> EnrollResult:
         try:
             with self._session_factory.begin() as session:
                 offering = self._lock_offering(session, offering_id)
-                learner = self._get_learner(session, learner_id)
+                learner, created = resolve_learner(session)
+                learner_id = learner.id
 
                 existing = self._get_registration(session, offering_id, learner_id)
                 if existing is not None:
@@ -122,7 +212,7 @@ class RegistrationService:
                 missing = self._missing_prerequisites(offering, learner)
                 if missing:
                     raise errors.PrerequisitesNotMet(
-                        f"Learner {learner_id} has not completed the prerequisites for {offering.code}.",
+                        f"Learner {learner.username} has not completed the prerequisites for {offering.code}.",
                         learner_id=learner_id,
                         missing_prerequisites=missing,
                     )
@@ -143,12 +233,14 @@ class RegistrationService:
                 position = None
                 if status is RegistrationStatus.WAITLISTED:
                     position = self._waitlist_position(session, registration)
-                return EnrollResult(offering_id, learner_id, status, position)
+                return EnrollResult(offering_id, learner_id, learner.username, status, position, created)
         except IntegrityError as exc:
-            # Unreachable while the offering lock holds; kept as a safety net.
+            # Unreachable while the offering lock holds (SQLite serializes all
+            # writers); on PostgreSQL a concurrent inline create of the same new
+            # username can also land here. Kept as a safety net.
             raise errors.DuplicateRegistration(
-                f"Learner {learner_id} is already registered for offering {offering_id}.",
-                learner_id=learner_id,
+                f"Conflicting concurrent registration for offering {offering_id}; retry the request.",
+                offering_id=offering_id,
             ) from exc
 
     def drop(self, offering_id: int, learner_id: str) -> DropResult:
@@ -220,6 +312,32 @@ class RegistrationService:
         if learner is None:
             raise errors.LearnerNotFound(f"Learner {learner_id} not found.", learner_id=learner_id)
         return learner
+
+    @staticmethod
+    def _find_by_username(session: Session, username: str) -> Learner | None:
+        return session.scalar(select(Learner).where(Learner.username == username.strip()))
+
+    def _insert_learner(self, session: Session, profile: LearnerProfile) -> Learner:
+        username = profile.username.strip()
+        if self._find_by_username(session, username) is not None:
+            raise self._username_taken(username)
+        codes = sorted({normalize_course_code(c) for c in profile.completed_courses})
+        learner = Learner(
+            username=username,
+            name=profile.name.strip(),
+            completed_courses=[LearnerCompletedCourse(course_code=c) for c in codes],
+        )
+        session.add(learner)
+        session.flush()
+        return learner
+
+    @staticmethod
+    def _username_taken(username: str) -> errors.UsernameTaken:
+        return errors.UsernameTaken(f"Username {username!r} is already taken.", username=username)
+
+    @staticmethod
+    def _learner_view(learner: Learner) -> LearnerView:
+        return LearnerView(learner.id, learner.username, learner.name, sorted(learner.completed_codes))
 
     @staticmethod
     def _get_registration(session: Session, offering_id: int, learner_id: str) -> Registration | None:
@@ -308,7 +426,7 @@ class RegistrationService:
         waitlist = []
         for position, (_, learner) in enumerate(self._waitlist(session, offering.id), start=1):
             missing = self._missing_prerequisites(offering, learner)
-            waitlist.append(WaitlistEntryView(learner.id, position, not missing, missing))
+            waitlist.append(WaitlistEntryView(learner.id, learner.username, position, not missing, missing))
         return OfferingState(
             id=offering.id,
             code=offering.code,

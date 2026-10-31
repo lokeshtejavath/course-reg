@@ -23,6 +23,11 @@ class LearnerNotFound(DomainError):
     http_status = 404
 
 
+class UsernameTaken(DomainError):
+    code = "USERNAME_TAKEN"
+    http_status = 409
+
+
 class RegistrationNotFound(DomainError):
     code = "NOT_REGISTERED"
     http_status = 404

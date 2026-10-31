@@ -2,9 +2,9 @@
 
 ## 1. Scope
 
-This service covers one slice of course registration: **enroll, drop, and FIFO waitlist promotion** for a course offering, plus leaving the waitlist, reading an offering's state, and creating an offering. Learners come from a seed file only.
+This service covers one slice of course registration: **enroll, drop, and FIFO waitlist promotion** for a course offering, plus leaving the waitlist, reading an offering's state, creating an offering, and creating learners and updating their completed courses at any time.
 
-The following are out of scope: frontend, course catalog, payments, auth/identity, multiple terms, deployment, a learner-management API, and a configurable policy engine.
+The following are out of scope: frontend, course catalog, payments, auth/identity, multiple terms, deployment, and a configurable policy engine.
 
 The supplied starter repo had no code or data model (only `README.md` and `.gitignore`). The brief's fallback applies, so this is a minimal service.
 
@@ -22,11 +22,9 @@ The project owner confirmed each of these before implementation began.
 | P6 | Free seat, only ineligible learners waiting | A new eligible enroll request takes the seat directly. |
 | P7 | "Enroll only once" | **Permanent.** A learner has at most one registration per offering. After `DROPPED` (drop) or `WITHDRAWN` (left the waitlist), any later enroll for that offering is rejected with `REENROLLMENT_NOT_ALLOWED`. |
 | P8 | Duplicate requests | `409` with a machine-readable code (`ALREADY_ENROLLED`, `ALREADY_WAITLISTED`) and the learner's current status. Nothing is written. |
-| P9 | Learner data | Loaded from `seed/seed.json` (insert-if-missing). There's no API to change learners. Eligibility changes happen directly in the DB (the tests do this). |
-
-**Decision made during implementation (not part of the confirmed set; flagged for review):**
-
-- **P10.** When a seat is free *and* a waitlisted learner is eligible, an enroll request first promotes waiting eligible learners in FIFO order, and only then places the new learner. This keeps FIFO fairness among eligible learners. It can only happen when a waiter regains eligibility while a seat sits free (P5 + P6), which, given P9, requires a direct DB edit. Covered by `test_reeligible_waiter_takes_free_seat_before_new_learner`. To reverse it, remove one line in `RegistrationService.enroll`.
+| P9 | Learner data *(revised)* | Learners can be created **at any time**, either via `POST /learners` or inline on enroll. The server generates a **UUID**, which is the only identifier used in transactions and API paths. The user supplies a unique **username** for reference and lookup. `PUT /learners/{id}/completed-courses` replaces completed courses. The seed file still adds demo learners (insert-if-missing by username). *Originally: seed file only, no learner API.* |
+| P11 | Inline enroll *(new)* | The enroll body carries **exactly one** of `learner_id` (existing learner) or `learner` (`{username, name, completed_courses}`). For `learner`: if the username is new, the learner is created and enrolled/waitlisted **in one transaction**, so a rejected enrollment also discards the new learner. If the username exists, that learner is used **as stored** and the supplied name and completed courses are ignored, so the request can still fail with `PREREQUISITES_NOT_MET`. Courses change only via `PUT …/completed-courses` *(confirmed by owner)*. The response's `learner_created` flag says which happened. |
+| P10 | Free seat + re-eligible waiter *(confirmed by owner)* | When a seat is free *and* a waitlisted learner is eligible again, a new enroll request first promotes eligible waiters in FIFO order. **The newcomer then joins the waitlist** if no seat remains. This keeps FIFO fairness among eligible learners. It only happens when a waiter regains eligibility (via `PUT …/completed-courses`) while a seat sits free (P5 + P6). Covered by `test_reeligible_waiter_takes_free_seat_before_new_learner`. |
 
 ## 3. Architecture
 
@@ -46,7 +44,7 @@ SQLAlchemy ORM (app/models.py)         SQLite by default; DATABASE_URL selects a
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `learners` | `id` (str PK), `name` | From the seed file. |
+| `learners` | `id` (UUID string PK, server-generated), `username` (unique), `name` | Created via the API or the seed file. Registrations reference `id` only. |
 | `learner_completed_courses` | (`learner_id`, `course_code`) PK | |
 | `offerings` | `id` (int PK), `code` (unique), `title`, `capacity` (CHECK ≥ 1) | |
 | `offering_prerequisites` | (`offering_id`, `course_code`) PK | |
@@ -60,9 +58,12 @@ One row per (offering, learner) holds the whole lifecycle: `ENROLLED → DROPPED
 
 | Method & path | Success | Errors |
 |---|---|---|
+| `POST /learners` `{username, name, completed_courses[]}` | `201 {id, username, name, completed_courses}`; `id` is server-generated and any client-sent `id` is ignored | `409 USERNAME_TAKEN`, `422 INVALID_REQUEST` |
+| `GET /learners/{id}`, `GET /learners/by-username/{username}` | `200` learner | `404 LEARNER_NOT_FOUND`, `422` for a non-UUID `id` |
+| `PUT /learners/{id}/completed-courses` `{completed_courses[]}` | `200` learner (no promotion triggered; P5) | `404 LEARNER_NOT_FOUND` |
 | `POST /offerings` `{code, title, capacity, prerequisites[]}` | `201` offering state | `409 OFFERING_CODE_EXISTS`, `422 INVALID_REQUEST` |
 | `GET /offerings/{id}` | `200` state: capacity, seats_available, enrolled ids, waitlist `[{learner_id, position, eligible, missing_prerequisites}]` | `404 OFFERING_NOT_FOUND` |
-| `POST /offerings/{id}/enrollments` `{learner_id}` | `201 {status: ENROLLED\|WAITLISTED, waitlist_position}` | `404 OFFERING_NOT_FOUND / LEARNER_NOT_FOUND`, `409 ALREADY_ENROLLED / ALREADY_WAITLISTED / REENROLLMENT_NOT_ALLOWED`, `422 PREREQUISITES_NOT_MET / INVALID_REQUEST` |
+| `POST /offerings/{id}/enrollments` `{learner_id}` **or** `{learner: {...}}` (P11) | `201 {learner_id, username, status: ENROLLED\|WAITLISTED, waitlist_position, learner_created}` | `404 OFFERING_NOT_FOUND / LEARNER_NOT_FOUND`, `409 ALREADY_ENROLLED / ALREADY_WAITLISTED / REENROLLMENT_NOT_ALLOWED`, `422 PREREQUISITES_NOT_MET / INVALID_REQUEST` |
 | `DELETE /offerings/{id}/enrollments/{learner_id}` (drop) | `200 {status: DROPPED, promoted_learner_ids[]}` | `404 … / NOT_REGISTERED`, `409 ALREADY_DROPPED / NOT_ENROLLED` |
 | `DELETE /offerings/{id}/waitlist/{learner_id}` (leave) | `200 {status: WITHDRAWN}` | `404 … / NOT_REGISTERED`, `409 ALREADY_WITHDRAWN / NOT_WAITLISTED` |
 | `GET /health` | `200` | |
@@ -102,6 +103,7 @@ Every service call is **one transaction** that begins by locking the offering:
 - **SQLite (default):** every transaction starts with `BEGIN IMMEDIATE` (`app/db.py`), which takes the database write lock up front. Concurrent writers queue for up to 30 s instead of interleaving, so "count seats, then insert" is atomic. This works across threads *and* processes (multiple uvicorn workers sharing one file).
 - **PostgreSQL / others:** the service runs `SELECT … FOR UPDATE` on the offering row (a no-op on SQLite). That serializes operations per offering while different offerings proceed in parallel. Switching backends needs only `DATABASE_URL` and a driver. **This path has not been run against a real Postgres**; see Limitations.
 - **Backstop:** the unique constraint rejects a second registration even if locking were bypassed. That `IntegrityError` is mapped to `409 ALREADY_REGISTERED`.
+- **Learner creation:** username uniqueness is checked in the transaction and backed by a unique constraint. Inline creation runs inside the offering-locked enroll transaction, so on SQLite two concurrent inline enrolls with the same new username produce exactly one learner (tested). On PostgreSQL the offering lock doesn't cover the learners table, so the loser of that race hits the constraint and gets `409 ALREADY_REGISTERED` ("retry"). A retry then succeeds against the now-existing learner.
 
 `tests/test_concurrency.py` releases 8–30 threads at once through a barrier. It checks capacity under concurrent enrolls, a single record under duplicate enrolls, a single promotion under duplicate drops, and invariants under mixed drops and enrolls. With `BEGIN IMMEDIATE` replaced by a plain `BEGIN`, all four tests fail (SQLite raises `database is locked`), so the tests do exercise the lock.
 

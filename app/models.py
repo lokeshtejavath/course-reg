@@ -7,6 +7,7 @@ WITHDRAWN it is never reused, so later enroll requests are rejected.
 """
 
 import enum
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, UniqueConstraint
@@ -26,10 +27,17 @@ class RegistrationStatus(str, enum.Enum):
     WITHDRAWN = "WITHDRAWN"  # was waitlisted, then left the waitlist
 
 
+def new_learner_id() -> str:
+    return str(uuid.uuid4())
+
+
 class Learner(Base):
     __tablename__ = "learners"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Server-generated UUID; the only identifier used by registrations and the API.
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_learner_id)
+    # Human-chosen handle for reference and lookup; never used as a foreign key.
+    username: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(200))
 
     completed_courses: Mapped[list["LearnerCompletedCourse"]] = relationship(

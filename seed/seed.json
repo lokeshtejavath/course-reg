@@ -1,10 +1,10 @@
 {
   "learners": [
-    {"id": "L001", "name": "Learner One", "completed_courses": ["CS101"]},
-    {"id": "L002", "name": "Learner Two", "completed_courses": ["CS101", "MATH101"]},
-    {"id": "L003", "name": "Learner Three", "completed_courses": ["CS101"]},
-    {"id": "L004", "name": "Learner Four", "completed_courses": []},
-    {"id": "L005", "name": "Learner Five", "completed_courses": ["CS101"]}
+    {"username": "L001", "name": "Learner One", "completed_courses": ["CS101"]},
+    {"username": "L002", "name": "Learner Two", "completed_courses": ["CS101", "MATH101"]},
+    {"username": "L003", "name": "Learner Three", "completed_courses": ["CS101"]},
+    {"username": "L004", "name": "Learner Four", "completed_courses": []},
+    {"username": "L005", "name": "Learner Five", "completed_courses": ["CS101"]}
   ],
   "offerings": [
     {"code": "CS201", "title": "Data Structures", "capacity": 2, "prerequisites": ["CS101"]}
