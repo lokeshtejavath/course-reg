@@ -103,17 +103,3 @@ tests/            pytest suite
 docs/             design spec, AI use record
 seed/seed.json    learners + demo offering
 ```
-
-## Limitations and follow-up risks
-
-- **SQLite allows one writer per database.** Every write is serialized across *all* offerings. Fine for a POC; a production load needs Postgres.
-- **Whole-offering lock.** A very popular offering serializes all of its requests. Acceptable at registration volumes, but worth load testing.
-- **Eligibility changes don't trigger promotion.** After `PUT …/completed-courses`, nothing re-evaluates the queue until the next seat opens (by design, P5). A seat can stay free until then if the only eligible waiter just became eligible.
-- **Inline enroll with an existing username ignores the supplied details (by design).** The stored learner is used as-is, so a client that sends updated courses inline can still get `PREREQUISITES_NOT_MET`. Update courses with `PUT …/completed-courses` first. Clients should be told this, because it's easy to miss.
-- **No learner listing, deletion or rename.** Only create, lookup and course updates exist. Usernames are case-sensitive (`jdoe` ≠ `JDoe`).
-- **Schema changed (learners gained `username`).** An existing `data/course_reg.db` from the earlier version won't upgrade itself. Delete it and restart.
-- **Retained ineligible learners stay forever.** Under skip-but-retain they hold a queue position until they leave. The waitlist can grow with entries that will never be promoted, and nothing expires them.
-- **A free seat can sit empty until the next request.** A waiter who regains eligibility isn't promoted immediately (P5). The seat is filled on the next drop *or* enroll. On an enroll, the re-eligible waiter takes the seat and the newcomer joins the waitlist (DESIGN P10).
-- **No auth.** Anyone can enroll or drop any learner (identity is out of scope).
-- **No migrations.** Tables come from `create_all`. Schema changes would need Alembic.
-- **Capacity is fixed** once an offering is created. There's no endpoint to change it.
