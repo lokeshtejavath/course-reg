@@ -6,23 +6,27 @@ database I/O; FastAPI runs them in its threadpool.
 
 from dataclasses import asdict
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Request, status
 
 from app.schemas import (
+    CompletedCoursesUpdate,
     DropOut,
     EnrollOut,
     EnrollRequest,
     ErrorResponse,
     LeaveWaitlistOut,
+    LearnerCreate,
+    LearnerOut,
     OfferingCreate,
     OfferingOut,
 )
-from app.service import OfferingState, RegistrationService
+from app.service import LearnerProfile, OfferingState, RegistrationService
 
 router = APIRouter()
 
-LearnerId = Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")]
+LearnerId = Annotated[UUID, Path()]
 OfferingId = Annotated[int, Path(ge=1)]
 
 ERRORS_404 = {404: {"model": ErrorResponse}}
@@ -34,6 +38,10 @@ def get_service(request: Request) -> RegistrationService:
 
 
 Service = Annotated[RegistrationService, Depends(get_service)]
+
+
+def _profile(body: LearnerCreate) -> LearnerProfile:
+    return LearnerProfile(body.username, body.name, body.completed_courses)
 
 
 def _offering_out(state: OfferingState) -> OfferingOut:
@@ -52,6 +60,41 @@ def _offering_out(state: OfferingState) -> OfferingOut:
 @router.get("/health", tags=["ops"])
 def health() -> dict:
     return {"status": "ok"}
+
+
+@router.post(
+    "/learners",
+    response_model=LearnerOut,
+    status_code=status.HTTP_201_CREATED,
+    responses=ERRORS_409,
+    tags=["learners"],
+)
+def create_learner(body: LearnerCreate, service: Service) -> LearnerOut:
+    """Create a learner. The server assigns the UUID ``id``; ``username`` is for reference."""
+    return LearnerOut(**asdict(service.create_learner(_profile(body))))
+
+
+# Declared before /learners/{learner_id} so "by-username" is not parsed as a UUID.
+@router.get("/learners/by-username/{username}", response_model=LearnerOut, responses=ERRORS_404, tags=["learners"])
+def get_learner_by_username(username: Annotated[str, Path(max_length=64)], service: Service) -> LearnerOut:
+    return LearnerOut(**asdict(service.get_learner_by_username(username)))
+
+
+@router.get("/learners/{learner_id}", response_model=LearnerOut, responses=ERRORS_404, tags=["learners"])
+def get_learner(learner_id: LearnerId, service: Service) -> LearnerOut:
+    return LearnerOut(**asdict(service.get_learner(str(learner_id))))
+
+
+@router.put(
+    "/learners/{learner_id}/completed-courses",
+    response_model=LearnerOut,
+    responses=ERRORS_404,
+    tags=["learners"],
+)
+def set_completed_courses(learner_id: LearnerId, body: CompletedCoursesUpdate, service: Service) -> LearnerOut:
+    """Replace the learner's completed courses. Waitlisted learners keep their
+    position; new eligibility is applied at the next seat opening."""
+    return LearnerOut(**asdict(service.set_completed_courses(str(learner_id), body.completed_courses)))
 
 
 @router.post(
@@ -79,8 +122,16 @@ def get_offering(offering_id: OfferingId, service: Service) -> OfferingOut:
     tags=["registration"],
 )
 def enroll(offering_id: OfferingId, body: EnrollRequest, service: Service) -> EnrollOut:
-    """Enroll a learner, or add them to the waitlist if the offering is full."""
-    return EnrollOut(**asdict(service.enroll(offering_id, body.learner_id)))
+    """Enroll a learner, or add them to the waitlist if the offering is full.
+
+    Send ``learner_id`` for an existing learner, or ``learner`` to enroll by
+    username, which creates the learner if the username is new.
+    """
+    if body.learner is not None:
+        result = service.enroll_with_profile(offering_id, _profile(body.learner))
+    else:
+        result = service.enroll(offering_id, str(body.learner_id))
+    return EnrollOut(**asdict(result))
 
 
 @router.delete(
@@ -91,7 +142,7 @@ def enroll(offering_id: OfferingId, body: EnrollRequest, service: Service) -> En
 )
 def drop(offering_id: OfferingId, learner_id: LearnerId, service: Service) -> DropOut:
     """Drop an enrolled learner and promote the earliest eligible waitlisted learner(s)."""
-    return DropOut(**asdict(service.drop(offering_id, learner_id)))
+    return DropOut(**asdict(service.drop(offering_id, str(learner_id))))
 
 
 @router.delete(
@@ -102,4 +153,4 @@ def drop(offering_id: OfferingId, learner_id: LearnerId, service: Service) -> Dr
 )
 def leave_waitlist(offering_id: OfferingId, learner_id: LearnerId, service: Service) -> LeaveWaitlistOut:
     """Remove a waitlisted learner from the queue."""
-    return LeaveWaitlistOut(**asdict(service.leave_waitlist(offering_id, learner_id)))
+    return LeaveWaitlistOut(**asdict(service.leave_waitlist(offering_id, str(learner_id))))

@@ -1,7 +1,7 @@
-"""Load learners (and optional demo offerings) from a JSON seed file.
+"""Load demo learners and offerings from a JSON seed file.
 
-Learners are managed only through this file; there is no learner API. Seeding
-is insert-if-missing, so restarting the app never overwrites existing rows.
+Seeding is insert-if-missing (learners matched by username, offerings by code),
+so restarting the app never overwrites existing rows. Learner UUIDs are generated.
 """
 
 import json
@@ -18,12 +18,12 @@ def load_seed(session_factory: sessionmaker, seed_file: Path) -> None:
     data = json.loads(seed_file.read_text(encoding="utf-8"))
     with session_factory.begin() as session:
         for item in data.get("learners", []):
-            if session.get(Learner, item["id"]) is not None:
+            if session.scalar(select(Learner.id).where(Learner.username == item["username"])) is not None:
                 continue
             codes = {normalize_course_code(c) for c in item.get("completed_courses", [])}
             session.add(
                 Learner(
-                    id=item["id"],
+                    username=item["username"],
                     name=item["name"],
                     completed_courses=[LearnerCompletedCourse(course_code=c) for c in sorted(codes)],
                 )

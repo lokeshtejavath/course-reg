@@ -31,7 +31,10 @@ def add_learner(session_factory):
         with session_factory.begin() as session:
             session.add(
                 Learner(
+                    # Fixed readable ids keep service-level assertions simple; the
+                    # service treats ids as opaque strings (the API enforces UUIDs).
                     id=learner_id,
+                    username=learner_id,
                     name=f"Learner {learner_id}",
                     completed_courses=[LearnerCompletedCourse(course_code=c) for c in completed],
                 )
@@ -103,10 +106,10 @@ def client(tmp_path) -> Iterator[TestClient]:
     seed.write_text(
         """{
           "learners": [
-            {"id": "A", "name": "A", "completed_courses": ["CS101"]},
-            {"id": "B", "name": "B", "completed_courses": ["cs101"]},
-            {"id": "C", "name": "C", "completed_courses": ["CS101"]},
-            {"id": "D", "name": "D", "completed_courses": []}
+            {"username": "A", "name": "A", "completed_courses": ["CS101"]},
+            {"username": "B", "name": "B", "completed_courses": ["cs101"]},
+            {"username": "C", "name": "C", "completed_courses": ["CS101"]},
+            {"username": "D", "name": "D", "completed_courses": []}
           ]
         }""",
         encoding="utf-8",
