@@ -1,0 +1,10 @@
+[project]
+name = "course-reg"
+version = "0.1.0"
+description = "Course enrollment, drop and FIFO waitlist promotion service (proof of concept)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
