@@ -62,13 +62,6 @@ curl localhost:8000/offerings/1
 | `DATABASE_URL` | `sqlite:///<repo>/data/course_reg.db` | Any SQLAlchemy URL (a Postgres URL also needs a driver, e.g. `psycopg`) |
 | `SEED_FILE` | `seed/seed.json` | Seed file path. Set it empty to disable seeding. |
 
-### Docker
-
-```bash
-docker build -t course-reg .
-docker run -p 8000:8000 -v course-reg-data:/data course-reg
-```
-
 ## Project layout
 
 ```
